@@ -198,4 +198,29 @@ assert.deepEqual(merged.sessions.map((session) => session.id), ["a", "c"]);
 assert.equal(merged.sessions[0].notes, "cloud");
 assert.ok(merged.deletedSessionIds.includes("b"));
 
+const native = D.createSession(byDay.push, []);
+assert.equal(D.adoptSession(native, plan), native);
+
+const archive = JSON.parse(require("fs").readFileSync(require("path").join(__dirname, "../gymlog-2026-11-22.json"), "utf8"));
+const adopted = D.adoptArchive(archive);
+assert.equal(adopted.sessions.length, archive.sessions.length);
+const pullupArchive = archive.sessions.find((session) => session.day === "pullups");
+const pullupAdopted = D.adoptSession(pullupArchive, plan);
+assert.equal(pullupAdopted.dayId, "pullups");
+assert.equal(pullupAdopted.dayTitle, "Подтягивания");
+assert.equal(pullupAdopted.exercises[0].exerciseId, "pullups");
+assert.equal(pullupAdopted.exercises[0].log, "reps");
+assert.equal(D.adoptSession(pullupAdopted, plan), pullupAdopted);
+
+const benchPast = D.previousFor(archive.sessions, "bench-barbell", null);
+assert.equal(benchPast.map[1].weightKg, 80);
+assert.equal(benchPast.map[1].reps, 8);
+const continued = D.createSession(byDay.push, adopted.sessions);
+assert.equal(continued.exercises[0].sets[0].weightKg, 80);
+assert.equal(continued.exercises[0].sets[0].reps, 8);
+assert.equal(continued.exercises[0].sets[0].done, false);
+const continuedPullups = D.createSession(byDay.pullups, adopted.sessions);
+assert.equal(continuedPullups.exercises[0].sets.length, 5);
+assert.equal(continuedPullups.exercises[0].sets[0].reps, 6);
+
 console.log("data.test.js ok");

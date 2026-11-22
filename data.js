@@ -581,6 +581,88 @@
     return String(Math.round(number * 10) / 10);
   }
 
+  function catalogIdByName(name) {
+    const key = String(name || "").trim();
+    return CATALOG.find((item) => item.name === key)?.id || "";
+  }
+
+  function cardioFromArchive(kind, minutes, km, steps) {
+    return {
+      kind: kind || "none",
+      minutes: minutes ?? null,
+      km: km ?? null,
+      steps: steps ?? null,
+    };
+  }
+
+  function sessionReady(session) {
+    if (!session?.dayId || !session.warmup || !session.cooldown) return false;
+    return (session.exercises || []).every((exercise) => {
+      if (!exercise?.uid) return false;
+      const catalogId = catalogIdByName(exercise.name);
+      return !catalogId || exercise.exerciseId === catalogId;
+    });
+  }
+
+  function adoptExercise(exercise, dayId) {
+    const exerciseId = exercise.exerciseId || catalogIdByName(exercise.name);
+    const item = byId(exerciseId);
+    return {
+      uid: exercise.uid || exercise.id || uid(),
+      blockUid: exercise.blockUid || (dayId && exerciseId ? `plan-${dayId}-${exerciseId}` : (exercise.uid || uid())),
+      exerciseId,
+      name: exercise.name || item?.name || "Упражнение",
+      log: exercise.log || item?.log || "strength",
+      targetSets: exercise.targetSets ?? (exercise.sets || []).length,
+      targetReps: exercise.targetReps || "",
+      startWeightKg: exercise.startWeightKg ?? null,
+      note: exercise.note || "",
+      sets: (exercise.sets || []).map((set, index) => ({
+        index: set.index || index + 1,
+        weightKg: set.weightKg ?? null,
+        reps: set.reps ?? null,
+        done: !!set.done,
+      })),
+    };
+  }
+
+  function adoptSession(session, plan) {
+    if (!session || sessionReady(session)) return session;
+    const dayId = session.dayId || session.day || "";
+    const day = (plan?.days || defaultPlan().days).find((item) => item.id === dayId);
+    const dayKind = session.dayKind || day?.kind || (dayId === "pullups" ? "pullups" : "gym");
+    return {
+      id: session.id,
+      date: session.date,
+      updatedAt: new Date().toISOString(),
+      dayId,
+      dayTitle: session.dayTitle || day?.title || dayId,
+      dayKind,
+      notes: session.notes || "",
+      completed: !!session.completed,
+      warmup: session.warmup || cardioFromArchive(session.warmupKind, session.warmupMinutes, session.warmupKm, session.warmupSteps),
+      cooldown: session.cooldown || cardioFromArchive(session.cooldownKind, session.cooldownMinutes, session.cooldownKm, session.cooldownSteps),
+      exercises: (session.exercises || []).map((exercise) => adoptExercise(exercise, dayId)),
+    };
+  }
+
+  function adoptArchive(payload) {
+    const plan = payload?.plan?.days ? payload.plan : null;
+    const basis = plan || defaultPlan();
+    return {
+      plan,
+      sessions: Array.isArray(payload?.sessions) ? payload.sessions.map((session) => adoptSession(session, basis)) : [],
+      deletedSessionIds: Array.isArray(payload?.deletedSessionIds) ? payload.deletedSessionIds : [],
+    };
+  }
+
+  function sameExercise(item, exerciseId) {
+    if (!item) return false;
+    if (item.exerciseId === exerciseId) return true;
+    const known = byId(exerciseId);
+    return !!known && item.name === known.name;
+  }
+
   function previousFor(sessions, exerciseId, excludeId) {
     const list = (sessions || [])
       .filter((session) => session.completed && session.id !== excludeId)
@@ -588,7 +670,7 @@
       .sort((a, b) => String(b.date).localeCompare(String(a.date)));
 
     for (const session of list) {
-      const exercise = (session.exercises || []).find((item) => item.exerciseId === exerciseId);
+      const exercise = (session.exercises || []).find((item) => sameExercise(item, exerciseId));
       if (!exercise) continue;
       const sets = exercise.sets || [];
       const done = sets.filter((set) => set.done);
@@ -781,6 +863,8 @@
     emptyCardio,
     fmtNum,
     previousFor,
+    adoptSession,
+    adoptArchive,
     createSession,
     repTotal,
     pullupSamples,
