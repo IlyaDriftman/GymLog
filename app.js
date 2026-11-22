@@ -298,9 +298,9 @@
           <input data-bind="block-reps" data-day="${esc(day.id)}" data-block="${esc(block.uid)}" value="${esc(block.reps)}">
         </label>
       </div>
-      <label>старт, кг
+      ${pastLine ? "" : `<label>старт, кг
         <input inputmode="decimal" data-bind="block-weight" data-day="${esc(day.id)}" data-block="${esc(block.uid)}" value="${esc(D.fmtNum(block.startWeightKg))}" placeholder="без веса">
-      </label>
+      </label>`}
       <label>заметка к кубику
         <input data-bind="block-note" data-day="${esc(day.id)}" data-block="${esc(block.uid)}" value="${esc(block.note || "")}" placeholder="необязательно">
       </label>
@@ -439,7 +439,7 @@
       <div class="progress"><i style="width:${width}%"></i></div>
       ${pullup}
       <h2>${esc(exercise.name)}</h2>
-      <p class="accent">${exercise.targetSets}× ${esc(exercise.targetReps)}${exercise.startWeightKg != null ? ` · план ${D.fmtNum(exercise.startWeightKg)} кг` : ""}</p>
+      <p class="accent">${exercise.targetSets}× ${esc(exercise.targetReps)}${!pastLine && exercise.startWeightKg != null ? ` · план ${D.fmtNum(exercise.startWeightKg)} кг` : ""}</p>
       <p class="muted small">${esc(muscleLine(item))}</p>
       ${exercise.note ? `<p class="muted">${esc(exercise.note)}</p>` : ""}
       ${pastLine ? `<p class="was">прошлый раз: ${esc(pastLine)}</p>` : `<p class="muted small">Прошлых весов пока нет — ориентир это стартовый вес плана.</p>`}
