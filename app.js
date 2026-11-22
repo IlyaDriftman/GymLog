@@ -19,25 +19,68 @@
     openTech: {},
     importText: "",
     returnTo: null,
+    accountSync: "local",
   };
 
   let db = loadDb();
   let toastId = 0;
   let toastTimer = 0;
+  let planFinger = "";
+  let sessionFingers = new Map();
+  let syncing = false;
+  let syncAgain = false;
 
   function loadDb() {
     try {
       const parsed = JSON.parse(localStorage.getItem(KEY) || "null");
-      if (parsed?.plan?.days && Array.isArray(parsed.sessions)) return parsed;
+      if (parsed?.plan?.days && Array.isArray(parsed.sessions)) {
+        if (!Array.isArray(parsed.deletedSessionIds)) parsed.deletedSessionIds = [];
+        return parsed;
+      }
     } catch (error) {
       /* keep the starter plan */
     }
-    return { plan: D.defaultPlan(), sessions: [] };
+    return { plan: D.defaultPlan(), sessions: [], deletedSessionIds: [] };
+  }
+
+  function recordBody(record) {
+    const copy = { ...record };
+    delete copy.updatedAt;
+    return JSON.stringify(copy);
+  }
+
+  function rememberFingers() {
+    planFinger = recordBody(db.plan);
+    sessionFingers = new Map(db.sessions.map((session) => [session.id, recordBody(session)]));
+  }
+
+  function stampDirty() {
+    const now = new Date().toISOString();
+    if (recordBody(db.plan) !== planFinger) db.plan.updatedAt = now;
+    for (const session of db.sessions) {
+      const body = recordBody(session);
+      if (!sessionFingers.has(session.id) || sessionFingers.get(session.id) !== body) {
+        session.updatedAt = now;
+      }
+    }
+  }
+
+  function writeLocal() {
+    db.sessions.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    localStorage.setItem(KEY, JSON.stringify(db));
   }
 
   function save() {
-    db.sessions.sort((a, b) => String(b.date).localeCompare(String(a.date)));
-    localStorage.setItem(KEY, JSON.stringify(db));
+    stampDirty();
+    writeLocal();
+    rememberFingers();
+    scheduleSync();
+  }
+
+  function forgetSession(id) {
+    if (!db.deletedSessionIds.includes(id)) db.deletedSessionIds.push(id);
+    db.sessions = db.sessions.filter((session) => session.id !== id);
+    save();
   }
 
   function dayById(id) {
@@ -201,6 +244,7 @@
       <button class="secondary wide" type="button" data-go="history">История тренировок</button>
       <button class="secondary wide" type="button" data-go="catalog">База упражнений</button>
       <button class="secondary wide" type="button" data-go="data">Данные</button>
+      <p class="muted small" data-sync>${esc(syncText())}</p>
       <p class="muted small foot">Левое плечо: жимы только гантелями, верхний блок к груди. Если больно — вес вниз, не терпеть.</p>
     </div>`;
   }
@@ -523,12 +567,18 @@
   }
 
   function exportPayload() {
-    return JSON.stringify({ plan: db.plan, sessions: db.sessions, exportedAt: new Date().toISOString() }, null, 2);
+    return JSON.stringify({
+      plan: db.plan,
+      sessions: db.sessions,
+      deletedSessionIds: db.deletedSessionIds,
+      exportedAt: new Date().toISOString(),
+    }, null, 2);
   }
 
   function viewData() {
     return `${topbar("Данные")}
-      <p class="muted">База лежит в этом браузере и в Telegram, если открываешь мини-приложение того же бота. На телефонные GymLog она сама не переносится — для копии выгрузи JSON.</p>
+      <p class="muted" data-sync>${esc(syncText())}</p>
+      <p class="muted">Кнопка ниже выгружает копию JSON. Ею можно перенести базу, если Telegram на телефоне недоступен.</p>
       <div class="stack" style="margin-top:14px">
         <button class="secondary wide" type="button" data-action="download">Скачать JSON</button>
         <button class="secondary wide" type="button" data-action="copy-json">Скопировать JSON</button>
@@ -806,6 +856,10 @@
       });
       db.sessions = [...map.values()];
     }
+    if (Array.isArray(parsed.deletedSessionIds)) {
+      db.deletedSessionIds = [...new Set([...(db.deletedSessionIds || []), ...parsed.deletedSessionIds])];
+      db.sessions = db.sessions.filter((session) => !db.deletedSessionIds.includes(session.id));
+    }
     save();
     state.view = "home";
     showToast("База загружена");
@@ -852,8 +906,7 @@
     } else if (action === "discard") {
       const session = activeSession();
       if (session && window.confirm("Удалить незавершённую тренировку?")) {
-        db.sessions = db.sessions.filter((item) => item.id !== session.id);
-        save();
+        forgetSession(session.id);
         render();
       }
     } else if (action === "open-day") {
@@ -999,8 +1052,7 @@
       if (session) openWorkout(session);
     } else if (action === "delete-session") {
       if (!window.confirm("Удалить эту тренировку из истории?")) return;
-      db.sessions = db.sessions.filter((session) => session.id !== state.detailId);
-      save();
+      forgetSession(state.detailId);
       go("history");
     } else if (action === "open-exercise") {
       state.catalogId = el.dataset.id;
@@ -1106,6 +1158,210 @@
     }
   }
 
+  function syncText() {
+    if (state.accountSync === "ok") return "План и история привязаны к аккаунту Telegram и подтягиваются на других телефонах.";
+    if (state.accountSync === "syncing") return "Синхронизация с аккаунтом Telegram…";
+    if (state.accountSync === "error") return "Не удалось связаться с аккаунтом Telegram. Пока данные только на этом телефоне.";
+    return "Чтобы план и история были на всех телефонах, открой GymLog внутри Telegram.";
+  }
+
+  function cloudOn() {
+    const telegram = window.Telegram?.WebApp;
+    return !!(telegram?.initData && telegram.CloudStorage);
+  }
+
+  function cloudCall(method, ...args) {
+    return new Promise((resolve, reject) => {
+      const storage = window.Telegram?.WebApp?.CloudStorage;
+      if (!storage?.[method]) {
+        reject(new Error("no-cloud"));
+        return;
+      }
+      storage[method](...args, (error, result) => {
+        if (error) reject(new Error(String(error)));
+        else resolve(result);
+      });
+    });
+  }
+
+  function sessionCloudKey(id, index) {
+    const safe = String(id).replace(/[^A-Za-z0-9]/g, "").slice(0, 80);
+    return index ? `gymlog_s_${safe}_${index}` : `gymlog_s_${safe}`;
+  }
+
+  async function writeCloudText(baseKey, text, indexedKey) {
+    const pieces = [];
+    const source = String(text);
+    for (let i = 0; i < source.length; i += 3900) pieces.push(source.slice(i, i + 3900));
+    if (!pieces.length) pieces.push("");
+    for (let index = 0; index < pieces.length; index += 1) {
+      const key = indexedKey ? indexedKey(index) : (index ? `${baseKey}_${index}` : baseKey);
+      await cloudCall("setItem", key, pieces[index]);
+    }
+    for (let index = pieces.length; index < 6; index += 1) {
+      const key = indexedKey ? indexedKey(index) : (index ? `${baseKey}_${index}` : baseKey);
+      try {
+        await cloudCall("removeItem", key);
+      } catch (error) {
+        /* the extra chunk was already absent */
+      }
+    }
+  }
+
+  function readGroupedCloud(keys, values) {
+    const planParts = [];
+    const deletedParts = [];
+    const sessionParts = new Map();
+    keys.forEach((key) => {
+      const text = values?.[key];
+      if (text == null || text === "") return;
+      if (key === "gymlog_plan" || key.startsWith("gymlog_plan_")) {
+        const index = key === "gymlog_plan" ? 0 : Number(key.slice("gymlog_plan_".length));
+        planParts.push({ index, text });
+        return;
+      }
+      if (key === "gymlog_deleted" || key.startsWith("gymlog_deleted_")) {
+        const index = key === "gymlog_deleted" ? 0 : Number(key.slice("gymlog_deleted_".length));
+        deletedParts.push({ index, text });
+        return;
+      }
+      if (!key.startsWith("gymlog_s_")) return;
+      const rest = key.slice("gymlog_s_".length);
+      const split = rest.match(/^(.*)_(\d+)$/);
+      const id = split ? split[1] : rest;
+      const index = split ? Number(split[2]) : 0;
+      if (!sessionParts.has(id)) sessionParts.set(id, []);
+      sessionParts.get(id).push({ index, text });
+    });
+    const join = (parts) => parts.slice().sort((a, b) => a.index - b.index).map((part) => part.text).join("");
+    let plan = null;
+    let deletedSessionIds = [];
+    const sessions = [];
+    try {
+      const planText = join(planParts);
+      if (planText) plan = JSON.parse(planText);
+    } catch (error) {
+      plan = null;
+    }
+    try {
+      const deletedText = join(deletedParts);
+      if (deletedText) deletedSessionIds = JSON.parse(deletedText);
+    } catch (error) {
+      deletedSessionIds = [];
+    }
+    sessionParts.forEach((parts) => {
+      try {
+        sessions.push(JSON.parse(join(parts)));
+      } catch (error) {
+        /* skip a broken workout */
+      }
+    });
+    return { plan, sessions, deletedSessionIds: Array.isArray(deletedSessionIds) ? deletedSessionIds : [] };
+  }
+
+  async function pullCloud() {
+    const raw = await cloudCall("getKeys");
+    const keys = Array.isArray(raw) ? raw : (raw?.keys || []);
+    const ours = keys.filter((key) => String(key).startsWith("gymlog_"));
+    const values = {};
+    for (let index = 0; index < ours.length; index += 40) {
+      const chunk = ours.slice(index, index + 40);
+      const part = await cloudCall("getItems", chunk);
+      const map = part?.values && typeof part.values === "object" ? part.values : part;
+      if (Array.isArray(map)) {
+        chunk.forEach((key, itemIndex) => {
+          values[key] = map[itemIndex];
+        });
+      } else if (map && typeof map === "object") {
+        Object.assign(values, map);
+      }
+    }
+    return readGroupedCloud(ours, values);
+  }
+
+  async function pushAccount(remote) {
+    const remoteSessions = new Map((remote?.sessions || []).map((session) => [session.id, session]));
+    if (db.plan.updatedAt && String(db.plan.updatedAt) >= String(remote?.plan?.updatedAt || "")) {
+      await writeCloudText("gymlog_plan", JSON.stringify(db.plan));
+    }
+    for (const session of db.sessions) {
+      const previous = remoteSessions.get(session.id);
+      if (previous && String(previous.updatedAt || "") >= String(session.updatedAt || "")) continue;
+      await writeCloudText("", JSON.stringify(session), (index) => sessionCloudKey(session.id, index));
+    }
+    for (const id of db.deletedSessionIds) {
+      for (let index = 0; index < 6; index += 1) {
+        try {
+          await cloudCall("removeItem", sessionCloudKey(id, index));
+        } catch (error) {
+          /* already removed */
+        }
+      }
+    }
+    await writeCloudText("gymlog_deleted", JSON.stringify(db.deletedSessionIds));
+  }
+
+  function paintSync() {
+    document.querySelectorAll("[data-sync]").forEach((node) => {
+      node.textContent = syncText();
+    });
+  }
+
+  function applyMerged(merged) {
+    const before = JSON.stringify(db);
+    db.plan = merged.plan;
+    db.sessions = merged.sessions;
+    db.deletedSessionIds = merged.deletedSessionIds;
+    db.sessions.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    const changed = JSON.stringify(db) !== before;
+    if (changed) {
+      rememberFingers();
+      writeLocal();
+    }
+    return changed;
+  }
+
+  async function syncAccount() {
+    if (!cloudOn()) {
+      state.accountSync = "local";
+      paintSync();
+      return;
+    }
+    if (syncing) {
+      syncAgain = true;
+      return;
+    }
+    syncing = true;
+    state.accountSync = "syncing";
+    paintSync();
+    try {
+      const remote = await pullCloud();
+      const changed = applyMerged(D.mergeAccount(db, remote));
+      await pushAccount(remote);
+      state.accountSync = "ok";
+      if (changed) render({ keepScroll: true });
+      else paintSync();
+    } catch (error) {
+      state.accountSync = "error";
+      paintSync();
+    } finally {
+      syncing = false;
+      if (syncAgain) {
+        syncAgain = false;
+        syncAccount();
+      }
+    }
+  }
+
+  function scheduleSync() {
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => {
+      syncAccount();
+    }, 700);
+  }
+
+  let syncTimer = 0;
+
   function initTelegram() {
     const tg = window.Telegram?.WebApp;
     if (!tg || tg.__gymlog) return;
@@ -1145,6 +1401,18 @@
   }, true);
 
   initTelegram();
+  const stamped = D.accountStamp(db);
+  if (stamped.planUpdatedAt && stamped.planUpdatedAt !== db.plan.updatedAt) db.plan.updatedAt = stamped.planUpdatedAt;
+  stamped.sessions.forEach((session, index) => {
+    db.sessions[index].updatedAt = session.updatedAt;
+  });
+  rememberFingers();
+  writeLocal();
+  state.accountSync = cloudOn() ? "syncing" : "local";
   restoreUi();
   render();
+  syncAccount();
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") syncAccount();
+  });
 })();

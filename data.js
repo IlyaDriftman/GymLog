@@ -710,6 +710,63 @@
     };
   }
 
+  function withoutStamp(record) {
+    if (!record) return "";
+    const copy = { ...record };
+    delete copy.updatedAt;
+    return JSON.stringify(copy);
+  }
+
+  function accountTime(record) {
+    return String(record?.updatedAt || record?.date || "");
+  }
+
+  function accountStamp(database) {
+    const plan = database?.plan || defaultPlan();
+    const sessions = database?.sessions || [];
+    let planUpdatedAt = plan.updatedAt || "";
+    const customized = withoutStamp(plan) !== withoutStamp(defaultPlan());
+    if (!planUpdatedAt && (sessions.length || customized)) {
+      planUpdatedAt = sessions.reduce((max, session) => (
+        String(session.date || "") > max ? String(session.date) : max
+      ), "") || "2020-01-01T00:00:00.000Z";
+    }
+    return {
+      planUpdatedAt,
+      sessions: sessions.map((session) => ({
+        ...session,
+        updatedAt: session.updatedAt || session.date || planUpdatedAt || "2020-01-01T00:00:00.000Z",
+      })),
+    };
+  }
+
+  function mergeAccount(local, remote) {
+    const deleted = [];
+    const seenDeleted = new Set();
+    for (const id of [...(local?.deletedSessionIds || []), ...(remote?.deletedSessionIds || [])]) {
+      if (!id || seenDeleted.has(id)) continue;
+      seenDeleted.add(id);
+      deleted.push(id);
+    }
+    const keptDeleted = deleted.slice(-400);
+
+    let plan = local?.plan || defaultPlan();
+    if (remote?.plan?.days && accountTime(remote.plan) > accountTime(plan)) plan = remote.plan;
+
+    const sessions = new Map();
+    for (const session of [...(local?.sessions || []), ...(remote?.sessions || [])]) {
+      if (!session?.id || seenDeleted.has(session.id)) continue;
+      const previous = sessions.get(session.id);
+      if (!previous || accountTime(session) > accountTime(previous)) sessions.set(session.id, session);
+    }
+
+    return {
+      plan,
+      sessions: [...sessions.values()],
+      deletedSessionIds: keptDeleted,
+    };
+  }
+
   return {
     MUSCLES,
     EQUIPMENT,
@@ -732,5 +789,7 @@
     cardioSummary,
     formatLoggedSet,
     newDay,
+    accountStamp,
+    mergeAccount,
   };
 });
