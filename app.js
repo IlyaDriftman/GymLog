@@ -35,6 +35,7 @@
       const parsed = JSON.parse(localStorage.getItem(KEY) || "null");
       if (parsed?.plan?.days && Array.isArray(parsed.sessions)) {
         if (!Array.isArray(parsed.deletedSessionIds)) parsed.deletedSessionIds = [];
+        parsed.sessions = parsed.sessions.map((session) => D.adoptSession(session, parsed.plan));
         return parsed;
       }
     } catch (error) {
@@ -843,15 +844,16 @@
       showToast("Это не JSON");
       return;
     }
-    if (!parsed || typeof parsed !== "object" || (!parsed.plan && !parsed.sessions)) {
+    const incoming = D.adoptArchive(parsed);
+    if (!incoming.plan && !incoming.sessions.length) {
       showToast("В тексте нет плана или тренировок");
       return;
     }
     if (!window.confirm("Загрузить базу? План заменится. Тренировки с тем же id обновятся, остальные останутся.")) return;
-    if (parsed.plan?.days) db.plan = parsed.plan;
-    if (Array.isArray(parsed.sessions)) {
+    if (incoming.plan?.days) db.plan = incoming.plan;
+    if (incoming.sessions.length) {
       const map = new Map(db.sessions.map((session) => [session.id, session]));
-      parsed.sessions.forEach((session) => {
+      incoming.sessions.forEach((session) => {
         if (session?.id) map.set(session.id, session);
       });
       db.sessions = [...map.values()];
@@ -1310,7 +1312,7 @@
   function applyMerged(merged) {
     const before = JSON.stringify(db);
     db.plan = merged.plan;
-    db.sessions = merged.sessions;
+    db.sessions = merged.sessions.map((session) => D.adoptSession(session, merged.plan));
     db.deletedSessionIds = merged.deletedSessionIds;
     db.sessions.sort((a, b) => String(b.date).localeCompare(String(a.date)));
     const changed = JSON.stringify(db) !== before;
